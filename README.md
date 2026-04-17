@@ -1,4 +1,6 @@
-### SMACross Backtest Result (from Jan-01-2024 to Apr-14-2026)
+### SMACross Backtest Result (from Jan-01-2024 to Apr-14-2026)  
+
+```
 ==================================================
 BACKTEST SUMMARY
 ==================================================
@@ -27,3 +29,4 @@ BACKTEST SUMMARY
   Sortino (daily) : 3.33
   Calmar          : 3.82
 ==================================================
+```

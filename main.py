@@ -237,6 +237,24 @@ def run_live() -> None:
         primary_count=100,
         secondary={secondary_tf: 300},
     )
+
+    info = mt5.account_info() # type: ignore
+    if info is not None:
+        print(
+            f"\n--- MT5 Live Account ---\n"
+            f"  Login:    {info.login}\n"
+            f"  Name:     {info.name}\n"
+            f"  Server:   {info.server}\n"
+            f"  Currency: {info.currency}\n"
+            f"  Balance:  {info.balance:,.2f}\n"
+            f"  Equity:   {info.equity:,.2f}\n"
+            f"  Margin:   {info.margin:,.2f}\n"
+            f"  Free margin: {info.margin_free:,.2f}\n"
+            f"  Leverage: 1:{info.leverage}\n"
+            f"  Trade allowed: {bool(info.trade_allowed)}\n"
+            f"------------------------\n"
+        )
+
     session.go_live()
 
 
