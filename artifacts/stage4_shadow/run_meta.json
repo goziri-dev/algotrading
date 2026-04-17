@@ -1,0 +1,10 @@
+{
+  "end_utc": "2026-04-14T12:47:01+00:00",
+  "live_slippage_pct": 0.0024,
+  "match_tolerance_seconds": 120,
+  "primary_tf": "M1",
+  "start_utc": "2026-04-14T10:41:01+00:00",
+  "symbol": "XAUUSD",
+  "target_closed_trades": 10,
+  "warmup_bars": 300
+}
