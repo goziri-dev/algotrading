@@ -1,6 +1,6 @@
 from datetime import datetime, time, timezone
 from itertools import compress
-from typing import Literal, Union
+from typing import Callable, Literal, Union
 
 import numpy as np
 import pandas as pd
@@ -175,3 +175,41 @@ def session(
     if 0 <= hour < 9:
         return "tokyo"
     return "sydney"
+
+
+class MonthlyDrawdownTracker:
+    """Track peak equity and max drawdown within each calendar month.
+
+    Pass ``equity_source`` as a zero-arg callable returning current equity —
+    e.g. ``lambda: strategy.strategy_equity`` for strategy-scoped, or
+    ``lambda: strategy.equity`` for portfolio-scoped. Call :meth:`update` once
+    per bar with the bar time; read :meth:`breached` to gate new entries.
+    """
+
+    def __init__(self, equity_source: Callable[[], float]):
+        self._equity_source = equity_source
+        self._month_key: tuple[int, int] | None = None
+        self._peak: float = 0.0
+        self._max_dd_pct: float = 0.0
+
+    def update(self, now: datetime) -> None:
+        key = (now.year, now.month)
+        equity = self._equity_source()
+        if key != self._month_key:
+            self._month_key = key
+            self._peak = equity
+            self._max_dd_pct = 0.0
+            return
+        if equity > self._peak:
+            self._peak = equity
+        if self._peak > 0.0:
+            dd_pct = (self._peak - equity) / self._peak * 100.0
+            if dd_pct > self._max_dd_pct:
+                self._max_dd_pct = dd_pct
+
+    @property
+    def max_dd_pct(self) -> float:
+        return self._max_dd_pct
+
+    def breached(self, limit_pct: float) -> bool:
+        return self._max_dd_pct > limit_pct

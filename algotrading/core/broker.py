@@ -124,6 +124,14 @@ class Broker(ABC):
         """
         pass
 
+    def realized_pnl(self, strategy_id: int) -> float:
+        """Cumulative realized PnL (net of costs) for closed trades of this strategy.
+
+        Default returns 0.0 for live brokers that don't track a trade log locally.
+        BacktestBroker overrides this with the actual sum.
+        """
+        return 0.0
+
     def value_per_point(self, symbol: str) -> float:
         """Account-currency value of a 1-point move for one engine qty unit."""
         return 1.0
@@ -259,6 +267,10 @@ class BrokerView:
     @property
     def positions(self) -> list[Position]:
         return self._broker.get_positions(self._strategy.symbol, self._strategy.id)
+
+    @property
+    def realized_pnl(self) -> float:
+        return self._broker.realized_pnl(self._strategy.id)
 
     def close_positions(self, position_ids: list[int] | None = None) -> None:
         """Close positions for this strategy, optionally restricted to specific IDs."""

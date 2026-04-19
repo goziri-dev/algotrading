@@ -18,6 +18,7 @@ from algotrading.backtest.plotting import (
     plot_monthly_returns_heatmap,
     plot_price_with_trades,
     plot_price_with_trades_interactive,
+    save_swap_history_interactive_html,
     save_trade_history_interactive_html,
 )
 from algotrading.core.position import Position
@@ -205,7 +206,25 @@ def test_save_trade_history_interactive_html_creates_file(tmp_path: Path):
     content = output_path.read_text(encoding="utf-8")
     assert "Trade History Test" in content
     assert "Trade #" in content
+    assert "Gross PnL" in content
+    assert "Net PnL" in content
+    assert "Total Costs" in content
+    assert "Swap" in content
     assert "<span style=" not in content
+
+
+def test_save_swap_history_interactive_html_creates_file(tmp_path: Path):
+    broker = _sample_broker()
+    output_path = save_swap_history_interactive_html(
+        trades=broker.trade_log,
+        output_path=tmp_path / "swap_history.html",
+        title="Swap History Test",
+    )
+
+    assert output_path.exists()
+    content = output_path.read_text(encoding="utf-8")
+    assert "Swap History Test" in content
+    assert "total_swap=" in content
 
 
 def test_plot_price_with_trades_interactive_preserves_marker_times():

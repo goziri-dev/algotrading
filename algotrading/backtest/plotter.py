@@ -19,6 +19,7 @@ from .plotting import (
     plot_price_with_trades_interactive,
     plot_trade_pnl_distribution,
     save_interactive_figure_html,
+    save_swap_history_interactive_html,
     save_trade_history_interactive_html,
 )
 from .report import BacktestReport
@@ -52,6 +53,13 @@ class BacktestPlotter:
                 return None
             if len(values) == bar_count:
                 return values
+            # Indicators sourced from another indicator skip bars during the
+            # upstream's warmup, so their length can be shorter than the primary
+            # timeline. Right-align by prepending nans — values map to the tail.
+            if len(source_times) == bar_count and 0 < len(values) < bar_count:
+                out = np.full(bar_count, np.nan, dtype=np.float64)
+                out[bar_count - len(values):] = values
+                return out
             if len(values) != len(source_times) or bar_count == 0:
                 return None
 
@@ -123,6 +131,7 @@ class BacktestPlotter:
         output_dir: Path,
         max_markers_per_group: int = 0,
         max_line_points: int = 0,
+        include_monthly_heatmap: bool = True,
     ) -> dict[str, Any]:
         """Save standard report plots and return output paths."""
         broker = self.report.broker
@@ -142,10 +151,15 @@ class BacktestPlotter:
         self._save_plot(fig_eq, equity_path)
         outputs["equity_drawdown"] = equity_path
 
-        fig_monthly, _ = plot_monthly_returns_heatmap(broker)
-        monthly_path = output_dir / "monthly_returns_heatmap.png"
-        self._save_plot(fig_monthly, monthly_path)
-        outputs["monthly_returns"] = monthly_path
+        if include_monthly_heatmap and trades:
+            fig_monthly, _ = plot_monthly_returns_heatmap(
+                broker,
+                trades=trades,
+                title=f"{self.report.symbol} Monthly Returns Heatmap",
+            )
+            monthly_path = output_dir / "monthly_returns_heatmap.png"
+            self._save_plot(fig_monthly, monthly_path)
+            outputs["monthly_returns"] = monthly_path
 
         overlays, panels = self._indicator_specs()
         fig_history = plot_price_with_trades_interactive(
@@ -188,6 +202,14 @@ class BacktestPlotter:
                 title=f"{self.report.symbol} Trade History Table",
             )
             outputs["trade_history_table"] = trade_history_table_path
+
+            swap_history_table_path = output_dir / "swap_history_table.html"
+            save_swap_history_interactive_html(
+                trades=trades,
+                output_path=swap_history_table_path,
+                title=f"{self.report.symbol} Swap History Table",
+            )
+            outputs["swap_history_table"] = swap_history_table_path
 
         if self.report.benchmark_times and self.report.benchmark_prices:
             fig_vs, _ = plot_equity_vs_benchmark(

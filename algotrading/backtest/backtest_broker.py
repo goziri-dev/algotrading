@@ -1,5 +1,5 @@
 from dataclasses import dataclass, replace
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import math
 
 from algotrading.core.broker import (
@@ -36,10 +36,24 @@ class SymbolSpec:
     EUR account would be €3.18 at 1.10 EURUSD).  Applied once at open and once
     at close.  Defaults to 0 (no commission).
 
-    Example for BTCUSD on a EUR account with $7 round-trip commission::
+    `swap_long_per_day` is the daily swap cost (in account currency) charged per
+    unit qty held overnight for long positions. Defaults to 0 (no swap).
 
-        SymbolSpec(value_per_point=0.8528, spread_pct=0.042, contract_size=100_000.0,
-               commission_per_lot=3.18)
+    `swap_short_per_day` is the daily swap cost (in account currency) charged per
+    unit qty held overnight for short positions. Defaults to 0 (no swap).
+    Note: Many brokers credit swaps on short positions (negative cost) while
+    charging them on long positions.
+
+    `triple_swap_day` is the weekday (0=Monday, ..., 2=Wednesday, ..., 4=Friday)
+    whose end-of-day rollover is charged 3x to cover weekend settlement.
+    Defaults to 2 (Wednesday, common in forex): a position held through the
+    Wed→Thu midnight rollover pays 3x swap on that crossing. Set to None to
+    disable triple swap.
+
+    Example for EURUSD with typical forex swap::
+
+        SymbolSpec(spread_pct=0.002, swap_long_per_day=0.00003, 
+                   swap_short_per_day=-0.00001, triple_swap_day=2)
     """
     value_per_point: float = 1.0
     spread_pct: float = 0.0
@@ -49,6 +63,9 @@ class SymbolSpec:
     volume_min: float = 0.0
     volume_max: float = 0.0
     volume_step: float = 0.0
+    swap_long_per_day: float = 0.0  # daily swap cost for long positions (account currency)
+    swap_short_per_day: float = 0.0  # daily swap cost for short positions (account currency)
+    triple_swap_day: int | None = 2  # weekday (0=Mon, 2=Wed, 4=Fri) where swap is 3x; None to disable
 
 
 @dataclass
@@ -67,6 +84,7 @@ class ClosedTrade:
     spread_cost: float # round-trip spread cost
     slippage_cost: float # round-trip slippage cost
     commission_cost: float # open + close commission
+    swap_cost: float = 0.0  # accumulated daily swap cost
 
     @property
     def is_win(self) -> bool:
@@ -74,7 +92,7 @@ class ClosedTrade:
 
     @property
     def costs(self) -> float:
-        return self.spread_cost + self.slippage_cost + self.commission_cost
+        return self.spread_cost + self.slippage_cost + self.commission_cost + self.swap_cost
 
     @property
     def gross_pnl(self) -> float:
@@ -176,6 +194,40 @@ class BacktestBroker(Broker):
             return 0.0
         lots = qty / spec.contract_size
         return lots * spec.commission_per_lot
+
+    def _calc_swap(self, symbol: str, qty: float, is_long: bool, entry_time: datetime, exit_time: datetime) -> float:
+        """Charge swap once per rollover crossed between entry_time and exit_time.
+
+        A rollover is a midnight boundary in the bar timestamp's clock. MT5 brokers
+        typically serve bars in GMT+2/+3 server time, so their midnight aligns with
+        the 17:00 NY FX rollover — meaning ``entry_time.date()`` vs ``exit_time.date()``
+        already counts the right number of rollovers.
+
+        The multiplier for each rollover is keyed by the weekday of the day the position
+        is *leaving*: the Wed→Thu rollover is the one that settles T+2 over the weekend,
+        so ``triple_swap_day=2`` (Wednesday) triples that crossing.
+
+        A position opened and closed on the same calendar day crosses no rollover and
+        incurs no swap.
+        """
+        spec = self._symbol_specs.get(symbol)
+        if spec is None:
+            return 0.0
+
+        swap_per_day = spec.swap_long_per_day if is_long else spec.swap_short_per_day
+        if swap_per_day == 0:
+            return 0.0
+
+        rollovers = (exit_time.date() - entry_time.date()).days
+        if rollovers <= 0:
+            return 0.0
+
+        total_swap = 0.0
+        for i in range(rollovers):
+            from_day = entry_time.date() + timedelta(days=i)
+            multiplier = 3.0 if (spec.triple_swap_day is not None and from_day.weekday() == spec.triple_swap_day) else 1.0
+            total_swap += swap_per_day * qty * multiplier
+        return total_swap
 
     # ------------------------------------------------------------------
     # Margin
@@ -317,12 +369,13 @@ class BacktestBroker(Broker):
             exit_mid = exit_price
         pnl_after_spread = self._calc_pnl(pos.symbol, exit_price - pos.entry_price, pos.qty, pos.is_long)
         close_commission = self._commission(pos.symbol, pos.qty)
-        self._balance += pnl_after_spread - close_commission
+        swap_cost = self._calc_swap(pos.symbol, pos.qty, pos.is_long, pos.entry_time, self._current_time)
+        self._balance += pnl_after_spread - close_commission - swap_cost
 
         entry_mid = self._entry_mids.pop(pos.id, pos.entry_price)
         entry_spread_pct = self._entry_spread_pct.pop(pos.id, 0.0)
         open_commission = self._entry_commissions.pop(pos.id, 0.0)
-        true_net_pnl = pnl_after_spread - close_commission - open_commission
+        true_net_pnl = pnl_after_spread - close_commission - open_commission - swap_cost
 
         spec = self._symbol_specs.get(pos.symbol)
         if spec is not None:
@@ -346,6 +399,7 @@ class BacktestBroker(Broker):
             spread_cost=spread_cost,
             slippage_cost=slippage_cost,
             commission_cost=commission_cost,
+            swap_cost=swap_cost,
         ))
         del self._positions[pos.id]
 
@@ -552,6 +606,13 @@ class BacktestBroker(Broker):
             )
             for pos in self._positions.values()
             if pos.strategy_id == strategy_id
+        )
+
+    def realized_pnl(self, strategy_id: int) -> float:
+        return sum(
+            trade.pnl
+            for trade in self.trade_log
+            if trade.position.strategy_id == strategy_id
         )
 
     def pnl_pct(self, strategy_id: int, position_id: int | None = None) -> float:

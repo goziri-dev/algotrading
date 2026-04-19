@@ -18,6 +18,7 @@ class BacktestStats:
     total_spread_cost: float
     total_slippage_cost: float
     total_commission_cost: float
+    total_swap_cost: float
     peak_equity: float
     trough_equity: float
     max_drawdown: float
@@ -165,6 +166,7 @@ def calculate_backtest_stats(broker: BacktestBroker) -> BacktestStats:
     total_spread_cost = sum(trade.spread_cost for trade in trades)
     total_slippage_cost = sum(trade.slippage_cost for trade in trades)
     total_commission_cost = sum(trade.commission_cost for trade in trades)
+    total_swap_cost = sum(trade.swap_cost for trade in trades)
     gross_profit = sum(trade.pnl for trade in wins)
     gross_loss = -sum(trade.pnl for trade in losses)
     profit_factor = (gross_profit / gross_loss) if gross_loss else None
@@ -227,6 +229,7 @@ def calculate_backtest_stats(broker: BacktestBroker) -> BacktestStats:
         total_spread_cost=total_spread_cost,
         total_slippage_cost=total_slippage_cost,
         total_commission_cost=total_commission_cost,
+        total_swap_cost=total_swap_cost,
         peak_equity=peak_equity,
         trough_equity=trough_equity,
         max_drawdown=max_drawdown,
@@ -275,7 +278,8 @@ def print_backtest_summary(broker: BacktestBroker, show_trades: bool = False) ->
         f"  Total costs     : {stats.total_costs:,.2f}"
         f"  (spread={stats.total_spread_cost:,.2f}"
         f"  slippage={stats.total_slippage_cost:,.2f}"
-        f"  commission={stats.total_commission_cost:,.2f})"
+        f"  commission={stats.total_commission_cost:,.2f}"
+        f"  swap={stats.total_swap_cost:,.2f})"
     )
     print(f"  Peak equity     : {stats.peak_equity:,.2f}")
     print(f"  Trough equity   : {stats.trough_equity:,.2f}")

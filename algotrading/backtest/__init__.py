@@ -17,7 +17,9 @@ from .plotting import (
 	plot_price_with_trades,
 	plot_price_with_trades_interactive,
 	plot_trade_history_table_interactive,
+	plot_swap_history_table_interactive,
 	save_trade_history_interactive_html,
+	save_swap_history_interactive_html,
 	save_interactive_figure_html,
 	show,
 )

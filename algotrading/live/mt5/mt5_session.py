@@ -90,6 +90,7 @@ class MT5Session:
         secondary: dict[Any, int] | None = None,
         symbol_specs: dict[str, SymbolSpec] | None = None,
         refresh_symbol_specs: bool = False,
+        leverage: float = 1 / 100,
     ) -> BacktestSession:
         """Fetch historical bars from MT5 and run a backtest.
 
@@ -178,6 +179,7 @@ class MT5Session:
             strategies=self._strategies,
             initial_balance=initial_balance,
             symbol_specs=resolved_specs,
+            leverage=leverage,
         )
         bt.run(
             primary_rates=primary_rates,
@@ -201,6 +203,8 @@ class MT5Session:
                 poll_interval=self._poll_interval,
             ).run()
         finally:
+            for s in self._strategies:
+                s.on_finish()
             self._live_broker.shutdown()
 
     # ------------------------------------------------------------------

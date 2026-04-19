@@ -2,8 +2,9 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 import hashlib
 import math
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
-from algotrading.indicators.indicator import Indicator
+from algotrading.indicators.indicator import Indicator, IndicatorOutput
 
 from .bars import Bars
 from .broker import BrokerView, SignalExecutionErrorReason, PositionCloseErrorReason
@@ -40,7 +41,7 @@ class Strategy[T: StrategyParams](ABC):
         self._id = self._generate_id()
         self._bars = Bars()
         self._secondary_bars: dict[str, Bars] = {}
-        self._indicators: list[tuple[Indicator, str | Indicator | tuple[str | Indicator, ...], Bars]] = []
+        self._indicators: list[tuple[Indicator, str | Indicator | IndicatorOutput | tuple[str | Indicator | IndicatorOutput, ...], Bars]] = []
         self._indicator_plot_visibility: dict[int, bool] = {}
         self._indicator_plot_labels: dict[int, str] = {}
         # (id(bars), id(indicator)) -> count of secondary bars already fed.
@@ -48,11 +49,12 @@ class Strategy[T: StrategyParams](ABC):
         # bound to the same secondary Bars all advance correctly.
         self._secondary_bars_consumed: dict[tuple[int, int], int] = {}
         self._broker: BrokerView | None = None
+        self._starting_equity: float | None = None
 
     def I[IndT: Indicator](
         self,
         ind: IndT,
-        source: str | Indicator | tuple[str | Indicator, ...],
+        source: str | Indicator | IndicatorOutput | tuple[str | Indicator | IndicatorOutput, ...],
         bars: Bars | None = None,
     ) -> IndT:
         """Register an indicator and bind it to a data source.
@@ -62,6 +64,7 @@ class Strategy[T: StrategyParams](ABC):
 
         - Any bar field name, including dynamic ones: `'close'`, `'noncomm_net'`
         - Another indicator (reads its latest value each bar)
+        - A named output of a multi-output indicator via ``ind.output("attr")``
         - A tuple of the above for multi-input indicators
 
         `bars` defaults to the primary timeframe. Pass a secondary bars
@@ -162,7 +165,7 @@ class Strategy[T: StrategyParams](ABC):
         for ind, source, bars in self._indicators:
             if bars is self._bars:
                 # Primary bars: feed current bar value once.
-                if isinstance(source, Indicator):
+                if isinstance(source, (Indicator, IndicatorOutput)):
                     val = source[-1]
                     if not math.isnan(val):
                         ind(val)
@@ -177,7 +180,7 @@ class Strategy[T: StrategyParams](ABC):
                 already_fed = self._secondary_bars_consumed.get(feed_key, 0)
                 current_len = len(bars)
                 for i in range(already_fed, current_len):
-                    if isinstance(source, Indicator):
+                    if isinstance(source, (Indicator, IndicatorOutput)):
                         val = source[-1]
                         if not math.isnan(val):
                             ind(val)
@@ -187,8 +190,18 @@ class Strategy[T: StrategyParams](ABC):
                         ind(*(bars[s][i] if isinstance(s, str) else s[-1] for s in source))
                 self._secondary_bars_consumed[feed_key] = current_len
 
-        if all(not math.isnan(ind[-1]) for ind, _, _ in self._indicators):
-            self.next()
+        if not all(not math.isnan(ind[-1]) for ind, _, _ in self._indicators):
+            return
+        # Also wait until all dynamic float fields on primary bars are finite.
+        # This prevents next() running before external data (e.g. COT) has been
+        # populated for the first time, without any per-strategy boilerplate.
+        if len(self._bars._fields) > len(Bars._BASE_FIELD_NAMES):
+            for name, _ in self._bars._fields:
+                if name not in Bars._BASE_FIELD_NAMES:
+                    arr = getattr(self._bars, name)
+                    if arr.dtype == float and self._bars._size > 0 and math.isnan(arr[self._bars._size - 1]):
+                        return
+        self.next()
 
     @property
     def params(self) -> T:
@@ -233,6 +246,11 @@ class Strategy[T: StrategyParams](ABC):
         return self.broker.equity
 
     @property
+    def time(self) -> datetime:
+        """Current bar time as a timezone-aware UTC datetime."""
+        return self._bars.time[-1].astype('datetime64[ms]').astype(datetime).replace(tzinfo=timezone.utc)
+
+    @property
     def vpp(self) -> float:
         """Convenience property to get the current value per point for the strategy symbol."""
         return self.broker.value_per_point(self._symbol)
@@ -274,6 +292,24 @@ class Strategy[T: StrategyParams](ABC):
         Otherwise returns the sum across all open positions for this strategy.
         """
         return self.broker.pnl(position_id)
+
+    @property
+    def realized_pnl(self) -> float:
+        """Cumulative realized PnL (net of costs) from this strategy's closed trades."""
+        return self.broker.realized_pnl
+
+    @property
+    def strategy_equity(self) -> float:
+        """Equity attributable only to this strategy.
+
+        Captures a baseline of broker equity on first access, then tracks this
+        strategy's realized + unrealized PnL on top. Lets each strategy sit on
+        a shared broker while still reasoning about its own account growth,
+        independent of what other strategies are contributing to the pot.
+        """
+        if self._starting_equity is None:
+            self._starting_equity = self.equity
+        return self._starting_equity + self.realized_pnl + self.pnl()
 
     def pnl_pct(self, position_id: int | None = None) -> float:
         """Unrealized PnL as a percentage of cost basis.
@@ -408,3 +444,12 @@ class Strategy[T: StrategyParams](ABC):
     def on_position_close_error(self, position: Position, reason: PositionCloseErrorReason) -> None:
         """Called by BrokerView when a position fails to close."""
         print(f"Error closing position: {position}, reason: {reason}")
+
+    def on_finish(self) -> None:
+        """Called once after the strategy stops receiving bars.
+
+        Fires at the end of a backtest run and on live-session shutdown
+        (including Ctrl-C and unhandled exceptions). Override to flush state,
+        close files, send notifications, or log final stats. Must not submit
+        new signals — the broker is already tearing down.
+        """

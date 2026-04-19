@@ -12,7 +12,9 @@ from .backtest_session import BacktestSession
 from .plotter import BacktestPlotter
 from .plotting import (
     plot_equity_vs_symbols,
+    plot_monthly_returns_heatmap,
     plot_symbol_return_correlation,
+    save_swap_history_interactive_html,
     save_trade_history_interactive_html,
 )
 from .report import BacktestReport
@@ -197,6 +199,12 @@ def _save_multi_symbol_unified_outputs(
     configured_symbols = {strategy.symbol for strategy in strategies}
     traded_symbols = {trade.position.symbol for trade in broker.trade_log}
 
+    if broker.equity_curve:
+        fig_monthly, _ = plot_monthly_returns_heatmap(broker)
+        fig_monthly.savefig(
+            output_dir / "monthly_returns_heatmap.png", dpi=140, bbox_inches="tight"
+        )
+
     symbol_series = _collect_symbol_series(strategies, configured_symbols)
     if len(symbol_series) >= 2:
         fig_vs, _ = plot_equity_vs_symbols(
@@ -221,4 +229,9 @@ def _save_multi_symbol_unified_outputs(
             trades=unified_trades,
             output_path=output_dir / "trade_history_table_unified.html",
             title="Unified Trade History Table",
+        )
+        save_swap_history_interactive_html(
+            trades=unified_trades,
+            output_path=output_dir / "swap_history_table_unified.html",
+            title="Unified Swap History Table",
         )

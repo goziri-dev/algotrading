@@ -74,9 +74,10 @@ class Bars(Growable):
         Extra keyword arguments are forwarded as dynamic fields using their
         public names (without leading underscore).
 
-        Dynamic fields registered via ``add_field()`` that are not present in
-        ``extra`` are initialised to ``nan`` (float fields) or ``0`` (integer
-        fields) so indicators never read uninitialised memory.
+        Dynamic fields registered via ``add_field()`` that are not provided in
+        ``extra`` are forward-filled from the previous bar's value. On the very
+        first bar (no previous value available), they fall back to ``nan``
+        (float fields) or ``0`` (integer fields).
 
         **WARNING!** If capacity is increased, the underlying arrays are replaced
         with new ones, so any references to the old arrays will become stale.
@@ -91,10 +92,14 @@ class Bars(Growable):
             _close=close,
             **{f'_{k}': v for k, v in extra.items()}
         )
-        # Initialise any dynamic fields not provided in this call to safe defaults.
+        # Forward-fill any dynamic fields not provided in this call.
+        # If a previous value exists, carry it forward; otherwise fall back to nan/0.
         if len(self._fields) > len(self._BASE_FIELD_NAMES):
             provided = frozenset(f'_{k}' for k in extra)
             for name, _ in self._fields:
                 if name not in self._BASE_FIELD_NAMES and name not in provided:
                     arr = getattr(self, name)
-                    arr[self._size - 1] = np.nan if np.issubdtype(arr.dtype, np.floating) else 0
+                    if self._size >= 2:
+                        arr[self._size - 1] = arr[self._size - 2]
+                    else:
+                        arr[self._size - 1] = np.nan if np.issubdtype(arr.dtype, np.floating) else 0

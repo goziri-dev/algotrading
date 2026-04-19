@@ -1,6 +1,5 @@
 from dataclasses import dataclass
-from datetime import datetime, timezone
-import math
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Literal
 
@@ -23,7 +22,7 @@ class SMACrossParams(StrategyParams):
     trend_period: int = 50
     dd_exit_threshold_pct: float = 8.0
     qty_multiplier: float = 1
-    pnl_pct_exit_threshold: float = 3
+    pnl_pct_exit_threshold: float = 3+2
     pnl_pct_sl_exit_threshold: float = -1
     plot_fast_sma: bool = True
     plot_slow_sma: bool = True
@@ -92,11 +91,11 @@ class SMACross(Strategy[SMACrossParams]):
         long_pct = float(self.bars["noncomm_longs_pct"][-1])
         short_pct = float(self.bars["noncomm_short_pct"][-1])
 
-        if not math.isfinite(long_pct) or not math.isfinite(short_pct):
-            return
-
         cot_bullish = long_pct > 60.0
         cot_bearish = short_pct > 60.0
+
+        if self.positions:
+            self.close_10_days_or_more_old_positions(self.positions[-1])
 
         if self.exit_when_drawdown_exceeds(self.params.dd_exit_threshold_pct):
             self.close_positions()
@@ -112,6 +111,10 @@ class SMACross(Strategy[SMACrossParams]):
                 return
             qty = fraction_to_qty(self.equity, 99.9, entry=self.price, value_per_point=vpp)
             self.sell(qty=qty * self.params.qty_multiplier)
+
+    def close_10_days_or_more_old_positions(self, position: Position) -> None:
+        if self.time - position.entry_time >= timedelta(days=30):
+            self.close_positions([position.id])
 
     def should_buy(self) -> bool:
         current_pos = self.positions[-1] if self.positions else None
@@ -207,6 +210,7 @@ def run_backtest() -> None:
         date_from=date_from,
         date_to=date_to,
         secondary={secondary_tf: 300},
+        refresh_symbol_specs=False,
     )
     print_backtest_summary(bt.broker)
     save_backtest_plots(
@@ -266,4 +270,4 @@ def main(mode: Literal["backtest", "live"]) -> None:
 
 
 if __name__ == "__main__":
-    main("live")
+    main("backtest")

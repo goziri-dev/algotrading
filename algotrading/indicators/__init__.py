@@ -1,4 +1,4 @@
-from .indicator import Indicator, IndicatorPlotSpec, IndicatorTraceSpec
+from .indicator import Indicator, IndicatorOutput, IndicatorPlotSpec, IndicatorTraceSpec
 from .sma import SMA
 from .ema import EMA
 from .rsi import RSI

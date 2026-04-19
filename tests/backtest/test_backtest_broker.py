@@ -1484,3 +1484,198 @@ class TestRealismParity:
         trade = broker.trade_log[0]
         assert trade.exit_price == pytest.approx(98.5)
         assert trade.spread_cost == pytest.approx(2.0)
+
+
+# ---------------------------------------------------------------------------
+# Swap
+# ---------------------------------------------------------------------------
+
+class TestSwap:
+    def test_long_swap_deducted_on_close(self):
+        """Swap on long positions is deducted from balance on close."""
+        spec = SymbolSpec(swap_long_per_day=1.0, triple_swap_day=None)  # 1 unit per day
+        broker = make_broker(balance=1_000.0, spec=spec)
+        broker.update_price(SYMBOL, 100.0, _ts("2024-01-01T00:00:00"))
+        broker.execute_signal(_long(qty=1.0))
+        # Close 2 days later: 2 rollovers (Jan 1→2, Jan 2→3) * 1.0 = 2.0 swap
+        broker.update_price(SYMBOL, 100.0, _ts("2024-01-03T00:00:00"))
+        broker.close_positions(_exit())
+        assert broker.balance == pytest.approx(998.0)
+
+    def test_short_swap_deducted_on_close(self):
+        """Swap on short positions is deducted from balance on close."""
+        spec = SymbolSpec(swap_short_per_day=0.5, triple_swap_day=None)  # 0.5 unit per day
+        broker = make_broker(balance=1_000.0, spec=spec)
+        broker.update_price(SYMBOL, 100.0, _ts("2024-01-01T00:00:00"))
+        broker.execute_signal(_short(qty=1.0))
+        # 2 rollovers * 0.5 = 1.0
+        broker.update_price(SYMBOL, 100.0, _ts("2024-01-03T00:00:00"))
+        broker.close_positions(_exit())
+        assert broker.balance == pytest.approx(999.0)
+
+    def test_swap_cost_tracked_in_trade_log(self):
+        """swap_cost is recorded in ClosedTrade."""
+        spec = SymbolSpec(swap_long_per_day=2.0, triple_swap_day=None)
+        broker = make_broker(spec=spec)
+        broker.update_price(SYMBOL, 100.0, _ts("2024-01-01T00:00:00"))
+        broker.execute_signal(_long(qty=1.0))
+        broker.update_price(SYMBOL, 100.0, _ts("2024-01-04T00:00:00"))
+        broker.close_positions(_exit())
+        trade = broker.trade_log[0]
+        assert trade.swap_cost == pytest.approx(6.0)  # 3 rollovers * 2.0
+
+    def test_swap_included_in_total_costs(self):
+        """swap_cost is included in trade.costs."""
+        spec = SymbolSpec(
+            commission_per_lot=5.0,
+            swap_long_per_day=1.0,
+            triple_swap_day=None,
+        )
+        broker = make_broker(balance=1_000.0, spec=spec)
+        broker.update_price(SYMBOL, 100.0, _ts("2024-01-01T00:00:00"))
+        broker.execute_signal(_long(qty=1.0))
+        broker.update_price(SYMBOL, 100.0, _ts("2024-01-02T00:00:00"))
+        broker.close_positions(_exit())
+        trade = broker.trade_log[0]
+        # commission: 5 (open) + 5 (close) = 10
+        # swap: 1 rollover * 1.0 = 1.0
+        # total costs = 10 + 1.0 = 11.0
+        assert trade.costs == pytest.approx(11.0)
+
+    def test_swap_scales_with_quantity(self):
+        """Swap cost scales linearly with position quantity."""
+        spec = SymbolSpec(swap_long_per_day=1.0, triple_swap_day=None)
+        broker = make_broker(spec=spec)
+        broker.update_price(SYMBOL, 100.0, _ts("2024-01-01T00:00:00"))
+        broker.execute_signal(_long(qty=2.0))  # 2x quantity
+        broker.update_price(SYMBOL, 100.0, _ts("2024-01-02T00:00:00"))
+        broker.close_positions(_exit())
+        trade = broker.trade_log[0]
+        # 1 rollover * 1.0 per unit * 2.0 qty = 2.0
+        assert trade.swap_cost == pytest.approx(2.0)
+
+    def test_short_positive_swap_charged(self):
+        """Short positions with positive swap_short are charged (not credited)."""
+        spec = SymbolSpec(swap_short_per_day=0.75, triple_swap_day=None)  # positive swap cost
+        broker = make_broker(balance=1_000.0, spec=spec)
+        broker.update_price(SYMBOL, 100.0, _ts("2024-01-01T00:00:00"))
+        broker.execute_signal(_short(qty=1.0))
+        broker.update_price(SYMBOL, 100.0, _ts("2024-01-02T00:00:00"))
+        broker.close_positions(_exit())
+        # 1 rollover * 0.75 = 0.75 swap cost deducted
+        assert broker.balance == pytest.approx(999.25)
+
+    def test_no_swap_when_spec_omitted(self):
+        """If SymbolSpec has no swap fields, no swap is charged."""
+        spec = SymbolSpec()  # default: swap_long_per_day=0, swap_short_per_day=0
+        broker = make_broker(balance=1_000.0, spec=spec)
+        broker.update_price(SYMBOL, 100.0, _ts("2024-01-01T00:00:00"))
+        broker.execute_signal(_long(qty=1.0))
+        broker.update_price(SYMBOL, 100.0, _ts("2024-01-10T00:00:00"))  # 9 days
+        broker.close_positions(_exit())
+        # no swap charged
+        assert broker.balance == pytest.approx(1_000.0)
+
+    def test_swap_pnl_included_in_net_pnl(self):
+        """Trade PnL includes swap cost deduction."""
+        spec = SymbolSpec(swap_long_per_day=1.0, triple_swap_day=None)
+        broker = make_broker(balance=1_000.0, spec=spec)
+        broker.update_price(SYMBOL, 100.0, _ts("2024-01-01T00:00:00"))
+        broker.execute_signal(_long(qty=1.0))
+        broker.update_price(SYMBOL, 110.0, _ts("2024-01-02T00:00:00"))  # +10 price change
+        broker.close_positions(_exit())
+        trade = broker.trade_log[0]
+        # gross_pnl (before swap) = 10.0
+        # swap = 1 rollover * 1.0 = 1.0
+        # net_pnl = 10.0 - 1.0 = 9.0
+        assert trade.pnl == pytest.approx(9.0)
+        assert trade.gross_pnl == pytest.approx(10.0)
+
+    def test_same_day_no_swap(self):
+        """A position opened and closed on the same broker-day crosses no rollover."""
+        spec = SymbolSpec(swap_long_per_day=1.0, triple_swap_day=2)
+        broker = make_broker(balance=1_000.0, spec=spec)
+        broker.update_price(SYMBOL, 100.0, _ts("2024-01-03T09:00:00"))  # Wednesday morning
+        broker.execute_signal(_long(qty=1.0))
+        broker.update_price(SYMBOL, 100.0, _ts("2024-01-03T18:00:00"))  # same Wednesday
+        broker.close_positions(_exit())
+        trade = broker.trade_log[0]
+        assert trade.swap_cost == pytest.approx(0.0)
+        assert broker.balance == pytest.approx(1_000.0)
+
+    def test_triple_swap_on_wednesday(self):
+        """Wednesday (weekday=2) has 3x swap multiplier on its end-of-day rollover."""
+        spec = SymbolSpec(swap_long_per_day=1.0, triple_swap_day=2)
+        broker = make_broker(spec=spec)
+        # 2024-01-01 is Monday; 2024-01-04 is Thursday.
+        # Rollovers: Mon→Tue (1), Tue→Wed (1), Wed→Thu (3) = 5 total
+        broker.update_price(SYMBOL, 100.0, _ts("2024-01-01T00:00:00"))  # Monday
+        broker.execute_signal(_long(qty=1.0))
+        broker.update_price(SYMBOL, 100.0, _ts("2024-01-04T00:00:00"))  # Thursday
+        broker.close_positions(_exit())
+        trade = broker.trade_log[0]
+        assert trade.swap_cost == pytest.approx(5.0)
+
+    def test_triple_swap_multiple_weeks(self):
+        """Triple swap applies on every Wed→Thu rollover across multiple weeks."""
+        spec = SymbolSpec(swap_long_per_day=1.0, triple_swap_day=2)
+        broker = make_broker(spec=spec)
+        # Open Mon Jan 1, close Fri Jan 12 → 11 rollovers.
+        # Wed→Thu rollovers: from Jan 3 and Jan 10 (2 triples).
+        # 9 normal (*1) + 2 triples (*3) = 9 + 6 = 15
+        broker.update_price(SYMBOL, 100.0, _ts("2024-01-01T00:00:00"))
+        broker.execute_signal(_long(qty=1.0))
+        broker.update_price(SYMBOL, 100.0, _ts("2024-01-12T00:00:00"))
+        broker.close_positions(_exit())
+        trade = broker.trade_log[0]
+        assert trade.swap_cost == pytest.approx(15.0)
+
+    def test_triple_swap_disabled_with_none(self):
+        """When triple_swap_day is None, no rollover gets 3x multiplier."""
+        spec = SymbolSpec(swap_long_per_day=1.0, triple_swap_day=None)
+        broker = make_broker(spec=spec)
+        broker.update_price(SYMBOL, 100.0, _ts("2024-01-01T00:00:00"))
+        broker.execute_signal(_long(qty=1.0))
+        broker.update_price(SYMBOL, 100.0, _ts("2024-01-12T00:00:00"))
+        broker.close_positions(_exit())
+        trade = broker.trade_log[0]
+        # 11 rollovers * 1.0 = 11.0
+        assert trade.swap_cost == pytest.approx(11.0)
+
+    def test_triple_swap_on_friday(self):
+        """Triple swap can be configured for Friday (weekday=4) instead of Wednesday."""
+        spec = SymbolSpec(swap_long_per_day=1.0, triple_swap_day=4)
+        broker = make_broker(spec=spec)
+        # Open Mon Jan 1, close Sat Jan 6.
+        # Rollovers: Mon→Tue, Tue→Wed, Wed→Thu, Thu→Fri (normal), Fri→Sat (triple).
+        # 4 + 3 = 7 total
+        broker.update_price(SYMBOL, 100.0, _ts("2024-01-01T00:00:00"))
+        broker.execute_signal(_long(qty=1.0))
+        broker.update_price(SYMBOL, 100.0, _ts("2024-01-06T00:00:00"))
+        broker.close_positions(_exit())
+        trade = broker.trade_log[0]
+        assert trade.swap_cost == pytest.approx(7.0)
+
+    def test_triple_swap_short_position(self):
+        """Triple swap applies to short positions with their own swap rate."""
+        spec = SymbolSpec(swap_short_per_day=0.5, triple_swap_day=2)
+        broker = make_broker(spec=spec)
+        # Open Mon, close Thu. Rollovers: Mon→Tue (0.5), Tue→Wed (0.5), Wed→Thu (1.5) = 2.5
+        broker.update_price(SYMBOL, 100.0, _ts("2024-01-01T00:00:00"))
+        broker.execute_signal(_short(qty=1.0))
+        broker.update_price(SYMBOL, 100.0, _ts("2024-01-04T00:00:00"))
+        broker.close_positions(_exit())
+        trade = broker.trade_log[0]
+        assert trade.swap_cost == pytest.approx(2.5)
+
+    def test_triple_swap_with_quantity(self):
+        """Triple swap scales with position quantity."""
+        spec = SymbolSpec(swap_long_per_day=1.0, triple_swap_day=2)
+        broker = make_broker(spec=spec)
+        # Open Mon, close Thu, qty=2. Rollovers: 2*1 + 2*1 + 2*3 = 10
+        broker.update_price(SYMBOL, 100.0, _ts("2024-01-01T00:00:00"))
+        broker.execute_signal(_long(qty=2.0))
+        broker.update_price(SYMBOL, 100.0, _ts("2024-01-04T00:00:00"))
+        broker.close_positions(_exit())
+        trade = broker.trade_log[0]
+        assert trade.swap_cost == pytest.approx(10.0)

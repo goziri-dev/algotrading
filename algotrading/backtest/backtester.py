@@ -61,27 +61,31 @@ class Backtester:
         sec = secondary_rates or {}
         prim_tfs = primary_timeframes or {}
 
-        if len(self._by_symbol) == 1:
-            symbol, symbol_strategies = next(iter(self._by_symbol.items()))
-            p_rates = primary_rates.get(symbol)
-            if p_rates is not None:
-                primary_duration = self._timeframe_duration(prim_tfs[symbol]) if symbol in prim_tfs else None
-                feed_bars(
-                    symbol,
-                    symbol_strategies,
-                    p_rates,
-                    sec.get(symbol),
-                    self._timeframe_duration,
-                    primary_duration,
+        try:
+            if len(self._by_symbol) == 1:
+                symbol, symbol_strategies = next(iter(self._by_symbol.items()))
+                p_rates = primary_rates.get(symbol)
+                if p_rates is not None:
+                    primary_duration = self._timeframe_duration(prim_tfs[symbol]) if symbol in prim_tfs else None
+                    feed_bars(
+                        symbol,
+                        symbol_strategies,
+                        p_rates,
+                        sec.get(symbol),
+                        self._timeframe_duration,
+                        primary_duration,
+                        show_progress=True,
+                    )
+            else:
+                feed_bars_aligned(
+                    symbols=list(self._by_symbol.keys()),
+                    by_symbol=self._by_symbol,
+                    primary_rates=primary_rates,
+                    secondary_rates=sec,
+                    primary_timeframes=prim_tfs,
+                    timeframe_duration=self._timeframe_duration,
                     show_progress=True,
                 )
-        else:
-            feed_bars_aligned(
-                symbols=list(self._by_symbol.keys()),
-                by_symbol=self._by_symbol,
-                primary_rates=primary_rates,
-                secondary_rates=sec,
-                primary_timeframes=prim_tfs,
-                timeframe_duration=self._timeframe_duration,
-                show_progress=True,
-            )
+        finally:
+            for s in self._strategies:
+                s.on_finish()

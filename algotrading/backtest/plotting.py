@@ -108,6 +108,28 @@ def _drawdown_from_equity(equity: Sequence[float]) -> np.ndarray:
     return (curve / safe_peak - 1.0) * 100.0
 
 
+def _grids_from_month_ends(
+    month_keys: list[tuple[int, int]],
+    month_end_equity: list[float],
+    initial_balance: float,
+) -> tuple[list[int], np.ndarray, np.ndarray]:
+    years = list(dict.fromkeys(year for year, _ in month_keys))
+    value_grid = np.full((len(years), 12), np.nan, dtype=np.float64)
+    pct_grid = np.full((len(years), 12), np.nan, dtype=np.float64)
+    year_to_row = {year: i for i, year in enumerate(years)}
+
+    prev_equity = float(initial_balance)
+    for (year, month), end_equity in zip(month_keys, month_end_equity):
+        monthly_value = end_equity - prev_equity
+        monthly_pct = (monthly_value / prev_equity * 100.0) if prev_equity > 0.0 else np.nan
+        row = year_to_row[year]
+        value_grid[row, month - 1] = monthly_value
+        pct_grid[row, month - 1] = monthly_pct
+        prev_equity = end_equity
+
+    return years, value_grid, pct_grid
+
+
 def _monthly_return_grids(broker: BacktestBroker) -> tuple[list[int], np.ndarray, np.ndarray]:
     times, equity = _equity_series(broker)
     if not times:
@@ -123,21 +145,30 @@ def _monthly_return_grids(broker: BacktestBroker) -> tuple[list[int], np.ndarray
         month_keys.append(key)
         month_end_equity.append(float(value))
 
-    years = list(dict.fromkeys(year for year, _ in month_keys))
-    value_grid = np.full((len(years), 12), np.nan, dtype=np.float64)
-    pct_grid = np.full((len(years), 12), np.nan, dtype=np.float64)
-    year_to_row = {year: i for i, year in enumerate(years)}
+    return _grids_from_month_ends(month_keys, month_end_equity, broker._initial_balance)
 
-    prev_equity = float(broker._initial_balance)
-    for (year, month), end_equity in zip(month_keys, month_end_equity):
-        monthly_value = end_equity - prev_equity
-        monthly_pct = (monthly_value / prev_equity * 100.0) if prev_equity > 0.0 else np.nan
-        row = year_to_row[year]
-        value_grid[row, month - 1] = monthly_value
-        pct_grid[row, month - 1] = monthly_pct
-        prev_equity = end_equity
 
-    return years, value_grid, pct_grid
+def _monthly_return_grids_from_trades(
+    trades: Sequence[ClosedTrade],
+    initial_balance: float,
+) -> tuple[list[int], np.ndarray, np.ndarray]:
+    if not trades:
+        raise ValueError("No trades to build monthly grids.")
+    sorted_trades = sorted(trades, key=lambda t: t.exit_time)
+    balance = float(initial_balance)
+    month_keys: list[tuple[int, int]] = []
+    month_end_equity: list[float] = []
+    for trade in sorted_trades:
+        balance += float(trade.pnl)
+        t = trade.exit_time
+        key = (t.year, t.month)
+        if month_keys and key == month_keys[-1]:
+            month_end_equity[-1] = balance
+            continue
+        month_keys.append(key)
+        month_end_equity.append(balance)
+
+    return _grids_from_month_ends(month_keys, month_end_equity, initial_balance)
 
 
 def _nearest_prices_for_times(
@@ -644,13 +675,24 @@ def plot_symbol_return_correlation(
 
 
 def plot_monthly_returns_heatmap(
-    broker: BacktestBroker,
+    broker: BacktestBroker | None = None,
     *,
     title: str = "Monthly Returns Heatmap",
     ax=None,
+    trades: Sequence[ClosedTrade] | None = None,
+    initial_balance: float | None = None,
 ):
     plt, _ = _require_matplotlib()
-    years, value_grid, pct_grid = _monthly_return_grids(broker)
+    if trades is not None:
+        if initial_balance is None:
+            if broker is None:
+                raise ValueError("initial_balance is required when passing trades without a broker.")
+            initial_balance = float(broker._initial_balance)
+        years, value_grid, pct_grid = _monthly_return_grids_from_trades(trades, initial_balance)
+    else:
+        if broker is None:
+            raise ValueError("Provide either a broker or a (trades, initial_balance) pair.")
+        years, value_grid, pct_grid = _monthly_return_grids(broker)
 
     if ax is None:
         fig_height = max(3.2, 1.9 + 0.68 * len(years))
@@ -1431,17 +1473,22 @@ def plot_trade_history_table_interactive(
     entry_price = [f"{float(trade.position.entry_price):,.5f}" for trade in trades]
     exit_time = [trade.exit_time.strftime("%Y-%m-%d %H:%M") for trade in trades]
     exit_price = [f"{float(trade.exit_price):,.5f}" for trade in trades]
-    pnl = [float(trade.pnl) for trade in trades]
-    pnl_text = [f"{value:+,.2f}" for value in pnl]
+    net_pnl = [float(trade.pnl) for trade in trades]
+    net_pnl_text = [f"{value:+,.2f}" for value in net_pnl]
+    gross_pnl = [float(trade.gross_pnl) for trade in trades]
+    gross_pnl_text = [f"{value:+,.2f}" for value in gross_pnl]
     costs = [float(trade.costs) for trade in trades]
     costs_text = [f"{value:,.2f}" for value in costs]
+    swap = [float(trade.swap_cost) for trade in trades]
+    swap_text = [f"{value:,.2f}" for value in swap]
     duration_hours = [
         f"{(trade.exit_time - trade.position.entry_time).total_seconds() / 3600.0:,.1f}"
         for trade in trades
     ]
 
     neutral_bg = ["#ffffff" for _ in trades]
-    pnl_bg = ["#dff4df" if value >= 0.0 else "#fde2e2" for value in pnl]
+    net_pnl_bg = ["#dff4df" if value >= 0.0 else "#fde2e2" for value in net_pnl]
+    gross_pnl_bg = ["#dff4df" if value >= 0.0 else "#fde2e2" for value in gross_pnl]
     cell_fill = [
         neutral_bg,   # Trade #
         neutral_bg,   # Symbol
@@ -1451,15 +1498,17 @@ def plot_trade_history_table_interactive(
         neutral_bg,   # Entry Price
         neutral_bg,   # Exit Time
         neutral_bg,   # Exit Price
-        pnl_bg,       # PnL
-        neutral_bg,   # Costs
+        gross_pnl_bg, # Gross PnL
+        neutral_bg,   # Total Costs
+        net_pnl_bg,   # Net PnL
+        neutral_bg,   # Swap
         neutral_bg,   # Hours
     ]
 
     fig = go.Figure(
         data=[
             go.Table(
-                columnwidth=[0.7, 0.9, 0.8, 0.8, 1.3, 1.0, 1.3, 1.0, 0.9, 0.9, 0.9],
+                columnwidth=[0.7, 0.9, 0.8, 0.8, 1.3, 1.0, 1.3, 1.0, 0.9, 1.0, 0.9, 0.9, 0.9],
                 header={
                     "values": [
                         "Trade #",
@@ -1470,8 +1519,10 @@ def plot_trade_history_table_interactive(
                         "Entry Price",
                         "Exit Time",
                         "Exit Price",
-                        "PnL",
-                        "Costs",
+                        "Gross PnL",
+                        "Total Costs",
+                        "Net PnL",
+                        "Swap",
                         "Hours",
                     ],
                     "fill_color": "#2b2d42",
@@ -1489,8 +1540,10 @@ def plot_trade_history_table_interactive(
                         entry_price,
                         exit_time,
                         exit_price,
-                        pnl_text,
+                        gross_pnl_text,
                         costs_text,
+                        net_pnl_text,
+                        swap_text,
                         duration_hours,
                     ],
                     "fill_color": cell_fill,
@@ -1499,6 +1552,8 @@ def plot_trade_history_table_interactive(
                     "font": {
                         "size": 11,
                         "color": [
+                            ["#222222"] * len(trades),
+                            ["#222222"] * len(trades),
                             ["#222222"] * len(trades),
                             ["#222222"] * len(trades),
                             ["#222222"] * len(trades),
@@ -1565,6 +1620,137 @@ def save_trade_history_interactive_html(
     auto_open: bool = False,
 ) -> Path:
     fig = plot_trade_history_table_interactive(trades, title=title)
+    target = Path(output_path)
+    save_interactive_figure_html(fig, target, auto_open=auto_open)
+    return target
+
+
+def plot_swap_history_table_interactive(
+    trades: Sequence[ClosedTrade],
+    *,
+    title: str = "Swap History",
+):
+    go = _require_plotly()
+
+    if not trades:
+        raise ValueError("Trade history is empty.")
+
+    ids = [trade.position.id for trade in trades]
+    symbols = [trade.position.symbol for trade in trades]
+    directions = [trade.position.direction.value for trade in trades]
+    qty = [f"{float(trade.position.qty):,.4f}" for trade in trades]
+    entry_time = [trade.position.entry_time.strftime("%Y-%m-%d %H:%M") for trade in trades]
+    exit_time = [trade.exit_time.strftime("%Y-%m-%d %H:%M") for trade in trades]
+    hold_days = [
+        f"{(trade.exit_time.date() - trade.position.entry_time.date()).days + 1}"
+        for trade in trades
+    ]
+    swap = [float(trade.swap_cost) for trade in trades]
+    swap_text = [f"{value:,.2f}" for value in swap]
+    swap_per_day = [
+        value / max((trade.exit_time.date() - trade.position.entry_time.date()).days + 1, 1)
+        for trade, value in zip(trades, swap)
+    ]
+    swap_per_day_text = [f"{value:,.2f}" for value in swap_per_day]
+
+    neutral_bg = ["#ffffff" for _ in trades]
+    swap_bg = ["#dff4df" if value < 0.0 else "#fde2e2" if value > 0.0 else "#ffffff" for value in swap]
+    cell_fill = [
+        neutral_bg,  # Trade #
+        neutral_bg,  # Symbol
+        neutral_bg,  # Direction
+        neutral_bg,  # Qty
+        neutral_bg,  # Entry Time
+        neutral_bg,  # Exit Time
+        neutral_bg,  # Hold Days
+        swap_bg,     # Swap
+        neutral_bg,  # Swap / Day
+    ]
+
+    fig = go.Figure(
+        data=[
+            go.Table(
+                columnwidth=[0.7, 0.9, 0.8, 0.8, 1.3, 1.3, 0.8, 0.9, 0.9],
+                header={
+                    "values": [
+                        "Trade #",
+                        "Symbol",
+                        "Direction",
+                        "Qty",
+                        "Entry Time",
+                        "Exit Time",
+                        "Hold Days",
+                        "Swap",
+                        "Swap / Day",
+                    ],
+                    "fill_color": "#2b2d42",
+                    "font": {"color": "#ffffff", "size": 12},
+                    "align": "left",
+                    "height": 28,
+                },
+                cells={
+                    "values": [
+                        ids,
+                        symbols,
+                        directions,
+                        qty,
+                        entry_time,
+                        exit_time,
+                        hold_days,
+                        swap_text,
+                        swap_per_day_text,
+                    ],
+                    "fill_color": cell_fill,
+                    "align": "left",
+                    "height": 24,
+                    "font": {
+                        "size": 11,
+                        "color": [
+                            ["#222222"] * len(trades),
+                            ["#222222"] * len(trades),
+                            ["#222222"] * len(trades),
+                            ["#222222"] * len(trades),
+                            ["#222222"] * len(trades),
+                            ["#222222"] * len(trades),
+                            ["#222222"] * len(trades),
+                            ["#222222"] * len(trades),
+                            ["#222222"] * len(trades),
+                        ],
+                    },
+                },
+            )
+        ]
+    )
+    total_swap = sum(swap)
+    fig.update_layout(
+        title=title,
+        template="plotly_white",
+        margin={"l": 16, "r": 16, "t": 60, "b": 16},
+        annotations=[
+            {
+                "x": 1.0,
+                "y": 1.12,
+                "xref": "paper",
+                "yref": "paper",
+                "text": f"trades={len(trades)} total_swap={total_swap:,.2f}",
+                "showarrow": False,
+                "xanchor": "right",
+                "yanchor": "top",
+                "font": {"size": 11, "color": "#666666"},
+            }
+        ],
+    )
+    return fig
+
+
+def save_swap_history_interactive_html(
+    *,
+    trades: Sequence[ClosedTrade],
+    output_path: str | Path,
+    title: str = "Swap History",
+    auto_open: bool = False,
+) -> Path:
+    fig = plot_swap_history_table_interactive(trades, title=title)
     target = Path(output_path)
     save_interactive_figure_html(fig, target, auto_open=auto_open)
     return target

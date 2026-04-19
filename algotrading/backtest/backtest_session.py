@@ -42,6 +42,7 @@ class BacktestSession:
         strategies: Sequence[Strategy],
         initial_balance: float,
         symbol_specs: dict[str, SymbolSpec],
+        leverage: float = 1 / 100,
     ):
         if not strategies:
             raise ValueError("At least one strategy is required")
@@ -49,6 +50,7 @@ class BacktestSession:
         self._broker = BacktestBroker(
             initial_balance=initial_balance,
             symbol_specs=symbol_specs,
+            leverage=leverage,
         )
 
     @property

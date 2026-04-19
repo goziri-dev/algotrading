@@ -177,6 +177,12 @@ class MT5Broker(Broker):
         `value_per_point` and `spread_pct` are read from live MT5 data.
         `contract_size` is read from the symbol's trade_contract_size.
         `slippage_pct` and `commission_per_lot` must be supplied manually.
+        `swap_long_per_day` and `swap_short_per_day` are read from MT5 swap rates.
+
+        Swap rates are fetched from MT5 (in account currency per lot per day),
+        negated (since MT5 uses negative for costs), and divided by contract_size
+        to convert from per-lot to per-unit. This gives daily swap costs/credits
+        in account currency per engine qty unit.
 
         Returned `value_per_point` is normalized to one engine qty unit, not one
         broker lot, so backtest PnL/margin math matches live order sizing.
@@ -200,6 +206,17 @@ class MT5Broker(Broker):
         if info.trade_tick_size == 0 or contract_size == 0:
             raise MT5BrokerError(f"Invalid tick size or contract size for '{symbol}'")
         value_per_point = (info.trade_tick_value / info.trade_tick_size) / contract_size
+        
+        # Fetch swap rates from MT5. These are in account currency per lot per day.
+        # Negative values in MT5 mean costs to the trader (what they pay).
+        # We want positive values to represent costs, so negate MT5's values
+        # and divide by contract_size to convert from per-lot to per-unit.
+        swap_long_per_lot = float(info.swap_long) if info.swap_long else 0.0
+        swap_short_per_lot = float(info.swap_short) if info.swap_short else 0.0
+        # Negate (flip sign) and divide by contract_size to get per-unit cost
+        swap_long_per_day = -swap_long_per_lot / contract_size if contract_size > 0 else 0.0
+        swap_short_per_day = -swap_short_per_lot / contract_size if contract_size > 0 else 0.0
+        
         return SymbolSpec(
             value_per_point=value_per_point,
             spread_pct=spread_pct,
@@ -209,6 +226,8 @@ class MT5Broker(Broker):
             volume_min=float(info.volume_min),
             volume_max=float(info.volume_max),
             volume_step=float(info.volume_step),
+            swap_long_per_day=swap_long_per_day,
+            swap_short_per_day=swap_short_per_day,
         )
 
     def value_per_point(self, symbol: str) -> float:

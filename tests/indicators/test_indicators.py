@@ -5,6 +5,7 @@ import pytest
 from algotrading.indicators.sma import SMA
 from algotrading.indicators.ema import EMA
 from algotrading.indicators.rsi import RSI
+from algotrading.indicators.bbands import BBANDS
 
 
 class TestSMAInit:
@@ -191,3 +192,30 @@ class TestRSICapacity:
         rsi(12.0)
         assert rsi._capacity >= 3
         assert rsi._size == 3
+
+
+class TestBBands:
+    def test_default_basis_is_sma(self):
+        bb = BBANDS(period=3, mult=2.0)
+        bb(1.0)
+        bb(2.0)
+        out = bb(3.0)
+        assert out.mid == pytest.approx(2.0)
+
+        out = bb(4.0)
+        assert out.mid == pytest.approx(3.0)
+
+    def test_smma_rma_basis(self):
+        bb = BBANDS(period=3, mult=2.0, ma_type="SMMA (RMA)")
+        bb(1.0)
+        bb(2.0)
+        out = bb(3.0)
+        assert out.mid == pytest.approx(2.0)
+
+        out = bb(4.0)
+        # RMA(period=3): (prev * 2 + price) / 3
+        assert out.mid == pytest.approx(8.0 / 3.0)
+
+    def test_rejects_unsupported_ma_type(self):
+        with pytest.raises(ValueError, match="Unsupported ma_type"):
+            BBANDS(period=20, mult=2.0, ma_type="VWMA")

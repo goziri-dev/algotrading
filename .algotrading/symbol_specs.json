@@ -1,34 +1,69 @@
 {
   "symbols": {
-    "BTCUSD": {
+    "EURGBP.i": {
       "commission_per_lot": 0.0,
-      "contract_size": 1.0,
+      "contract_size": 100000.0,
       "slippage_pct": 0.0024,
-      "spread_pct": 0.04234596654668643,
-      "value_per_point": 0.8484642796538264,
-      "volume_max": 5.0,
+      "spread_pct": 0.11147183037894981,
+      "swap_long_per_day": 6.59e-05,
+      "swap_short_per_day": -2.25e-05,
+      "triple_swap_day": 2,
+      "value_per_point": 1.148553970551076,
+      "volume_max": 40.0,
       "volume_min": 0.01,
       "volume_step": 0.01
     },
-    "XAGUSD": {
+    "EURUSD.i": {
       "commission_per_lot": 0.0,
-      "contract_size": 5000.0,
+      "contract_size": 100000.0,
       "slippage_pct": 0.0024,
-      "spread_pct": 0.08405417103141126,
-      "value_per_point": 0.8487811502682149,
-      "volume_max": 10.0,
+      "spread_pct": 0.007650621612999551,
+      "swap_long_per_day": 8.14e-05,
+      "swap_short_per_day": -3.25e-05,
+      "triple_swap_day": 2,
+      "value_per_point": 0.8500365515717174,
+      "volume_max": 40.0,
+      "volume_min": 0.01,
+      "volume_step": 0.01
+    },
+    "GBPUSD.i": {
+      "commission_per_lot": 0.0,
+      "contract_size": 100000.0,
+      "slippage_pct": 0.0024,
+      "spread_pct": 0.026628203705752133,
+      "swap_long_per_day": 2.2599999999999997e-05,
+      "swap_short_per_day": 2.83e-05,
+      "triple_swap_day": 2,
+      "value_per_point": 0.8500365515717174,
+      "volume_max": 40.0,
+      "volume_min": 0.01,
+      "volume_step": 0.01
+    },
+    "USDJPY.i": {
+      "commission_per_lot": 0.0,
+      "contract_size": 100000.0,
+      "slippage_pct": 0.0024,
+      "spread_pct": 0.008826236618801147,
+      "swap_long_per_day": -6.730000000000001e-05,
+      "swap_short_per_day": 0.00019920000000000002,
+      "triple_swap_day": 2,
+      "value_per_point": 0.005358539905046673,
+      "volume_max": 40.0,
       "volume_min": 0.01,
       "volume_step": 0.01
     },
     "XAUUSD": {
       "commission_per_lot": 0.0,
-      "contract_size": 1.0,
+      "contract_size": 100.0,
       "slippage_pct": 0.0024,
-      "spread_pct": 0.0,
-      "value_per_point": 1.0,
-      "volume_max": 0.0,
-      "volume_min": 0.0,
-      "volume_step": 0.0
+      "spread_pct": 0.0032836880742576195,
+      "swap_long_per_day": 0.8484,
+      "swap_short_per_day": -0.3543,
+      "triple_swap_day": 2,
+      "value_per_point": 0.847931894110265,
+      "volume_max": 30.0,
+      "volume_min": 0.01,
+      "volume_step": 0.01
     }
   }
 }

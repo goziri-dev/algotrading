@@ -42,6 +42,15 @@ class Indicator(Growable, ABC):
             return np.nan
         return float(self.value[index])
 
+    def output(self, attr: str) -> "IndicatorOutput":
+        """Reference a named output of this indicator (e.g. ``BBANDS.upper``).
+
+        Use as a ``source`` for another indicator::
+
+            self.ema = self.I(EMA(200), source=self.bbands.output("upper"))
+        """
+        return IndicatorOutput(self, attr)
+
     @abstractmethod
     def __call__(self, *args: Any, **kwds: Any) -> Self:
         """Compute and store the next value, return ``self`` for chaining."""
@@ -55,3 +64,22 @@ class Indicator(Growable, ABC):
         multi-trace outputs (e.g. BBANDS, ADX).
         """
         return IndicatorPlotSpec()
+
+
+class IndicatorOutput:
+    """Reference to a named output of a multi-output indicator.
+
+    Exposes ``[-1]`` indexing over the selected attribute so it can be used
+    as a ``source`` wherever an :class:`Indicator` is accepted.
+    """
+    __slots__ = ("_indicator", "_attr")
+
+    def __init__(self, indicator: Indicator, attr: str):
+        self._indicator = indicator
+        self._attr = attr
+
+    def __getitem__(self, index: int) -> float:
+        arr = getattr(self._indicator, self._attr)
+        if len(arr) == 0 or -index > len(arr):
+            return float("nan")
+        return float(arr[index])
