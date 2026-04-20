@@ -43,10 +43,12 @@ class BacktestSession:
         initial_balance: float,
         symbol_specs: dict[str, SymbolSpec],
         leverage: float = 1 / 100,
+        finalise_trades: bool = False,
     ):
         if not strategies:
             raise ValueError("At least one strategy is required")
         self._strategies = strategies
+        self._finalise_trades = finalise_trades
         self._broker = BacktestBroker(
             initial_balance=initial_balance,
             symbol_specs=symbol_specs,
@@ -74,7 +76,7 @@ class BacktestSession:
         Strategy.clear_shared_state()
         for s in self._strategies:
             BrokerView(self._broker, s)
-        Backtester(self._strategies).run(
+        Backtester(self._strategies, finalise_trades=self._finalise_trades).run(
             primary_rates=primary_rates,
             secondary_rates=secondary_rates,
             primary_timeframes=primary_timeframes,

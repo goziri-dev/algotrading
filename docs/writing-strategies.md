@@ -24,7 +24,8 @@ class MyStrategy(Strategy[StrategyParams]):
 | Property | Type | Description |
 |---|---|---|
 | `self.price` | `float` | Current bar's close price |
-| `self.equity` | `float` | Account equity (balance + unrealized PnL) |
+| `self.equity` | `float` | Account equity (balance + unrealized PnL) — whole portfolio |
+| `self.strategy_equity` | `float` | Equity scoped to this strategy only (see §4) |
 | `self.positions` | `list[Position]` | Open positions for this strategy |
 | `self.symbol` | `str` | The symbol this strategy trades |
 | `self.bars` | `Bars` | Full primary OHLC history |
@@ -153,6 +154,28 @@ def next(self) -> None:
 
 `crossover` / `crossunder` accept any mix of `Indicator`, numpy array, pandas Series, or scalar.
 
+### Session filter
+
+Use `session()` to gate entries to specific FX trading sessions. Boundaries are fixed in UTC and deterministic across DST.
+
+```python
+from algotrading.utils import session
+
+def next(self) -> None:
+    # "tokyo" | "london" | "new_york" | "sydney"
+    if session(self.time) in {"london", "new_york"}:
+        ...
+```
+
+| Session | UTC hours |
+|---|---|
+| `tokyo` | 00:00–08:59 |
+| `london` | 08:00–16:59 |
+| `new_york` | 13:00–21:59 |
+| `sydney` | all remaining times |
+
+Accepts `datetime`, `time`, `np.datetime64`, or `pd.Timestamp`.
+
 ---
 
 ## 4. Position Sizing
@@ -190,6 +213,49 @@ def next(self) -> None:
 | `risk_to_qty` | `(equity, risk_pct, entry, stop_loss, value_per_point)` | Lose at most X% of equity if SL is hit |
 
 `self.broker.max_affordable_qty(symbol, price)` returns the maximum quantity the account margin can support. `buy()` and `sell()` automatically cap qty at 99% of that value, so you don't need to check manually.
+
+### Strategy-scoped sizing: `self.strategy_equity`
+
+When multiple strategies share one broker, `self.equity` reflects the whole portfolio — so a profitable neighbour inflates your sizing and a drawing-down neighbour starves it. `self.strategy_equity` isolates that: it tracks `starting_equity + realized_pnl + unrealized_pnl` for **this strategy only**, so sizing compounds on your own track record rather than the portfolio's.
+
+```python
+def get_quantity(self) -> float:
+    sl = self.price - self._atr[-1] * 4
+    # size from this strategy's equity, not the shared portfolio equity
+    return risk_to_qty(self.strategy_equity, 1.0, self.price, sl, self.vpp)
+```
+
+The baseline is lazy-captured on first access, so strategies added to a warm session still get a correct starting point.
+
+### Monthly drawdown gate
+
+`MonthlyDrawdownTracker` pauses new entries after a strategy (or portfolio) draws down more than `N%` within the current calendar month. The peak resets each month.
+
+```python
+from algotrading.utils import MonthlyDrawdownTracker
+
+class MyStrategy(Strategy):
+    def __init__(self, symbol: str, params: MyParams = MyParams()):
+        super().__init__(symbol, params)
+        # scope the tracker to this strategy...
+        self._dd = MonthlyDrawdownTracker(lambda: self.strategy_equity)
+        # ...or to the whole portfolio:
+        # self._dd = MonthlyDrawdownTracker(lambda: self.equity)
+
+    def next(self) -> None:
+        self._dd.update(self.time)
+        if self._dd.breached(limit_pct=6.0):
+            return  # skip entries, leave open positions alone
+        ...
+```
+
+| Method | Description |
+|---|---|
+| `update(now: datetime)` | Call once per bar; rolls the peak on month change |
+| `breached(limit_pct)` | `True` when month DD exceeds the limit |
+| `max_dd_pct` | Current month's peak-to-trough DD (%) |
+
+The `equity_source` is a zero-arg callable, so you choose the scope — pass `lambda: self.strategy_equity` to gate only on this strategy's DD, or `lambda: self.equity` to gate on the portfolio.
 
 ---
 
@@ -705,7 +771,8 @@ class AdvancedStrategy(Strategy[AdvancedParams]):
 | Property | Type | Description |
 |---|---|---|
 | `self.price` | `float` | Latest close price |
-| `self.equity` | `float` | Balance + unrealized PnL |
+| `self.equity` | `float` | Portfolio equity (balance + unrealized PnL) |
+| `self.strategy_equity` | `float` | Equity scoped to this strategy only |
 | `self.positions` | `list[Position]` | Open positions |
 | `self.symbol` | `str` | Trading symbol |
 | `self.params` | `T` | Strategy parameters |
@@ -772,3 +839,15 @@ class AdvancedStrategy(Strategy[AdvancedParams]):
 | `BBANDS(period, mult)` | `BBANDS(20, 2.0)` | single field |
 | `ADX(di_length, adx_smoothing)` | `ADX(14, 14)` | `('high', 'low', 'close')` |
 | `COTIndex(period)` | `COTIndex(26)` | custom field via `update_bars` |
+
+### `algotrading.utils`
+
+| Helper | Purpose |
+|---|---|
+| `crossover(a, b)` | `True` if `a` crossed above `b` on the last bar |
+| `crossunder(a, b)` | `True` if `a` crossed below `b` on the last bar |
+| `bars_since(condition, default=inf)` | Bars since `condition` was last `True` |
+| `fraction_to_qty(equity, fraction_pct, entry, vpp)` | Size by % of equity deployed as notional |
+| `risk_to_qty(equity, risk_pct, entry, stop_loss, vpp)` | Size by % of equity risked if SL hits |
+| `session(at)` | Map a UTC time to `"tokyo" \| "london" \| "new_york" \| "sydney"` |
+| `MonthlyDrawdownTracker(equity_source)` | Gate entries by monthly DD % (resets each month) |

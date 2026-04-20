@@ -29,17 +29,23 @@ class Backtester:
     Note: bars for different symbols are processed symbol-by-symbol, not
     interleaved by timestamp.  True cross-symbol temporal alignment is a
     planned future feature.
+
+    Set ``finalise_trades=True`` to auto-close any still-open positions at the
+    end of the run (at the last bar's close price) so their PnL lands in the
+    trade log instead of being left unrealized.
     """
 
     def __init__(
         self,
         strategies: Sequence[Strategy],
         timeframe_duration: Callable[[Any], int] = mt5_timeframe_duration,
+        finalise_trades: bool = False,
     ):
         if not strategies:
             raise ValueError("At least one strategy is required")
         self._strategies = strategies
         self._timeframe_duration = timeframe_duration
+        self._finalise_trades = finalise_trades
 
         self._by_symbol: dict[str, list[Strategy]] = {}
         for s in strategies:
@@ -87,5 +93,8 @@ class Backtester:
                     show_progress=True,
                 )
         finally:
+            if self._finalise_trades:
+                for s in self._strategies:
+                    s.close_positions()
             for s in self._strategies:
                 s.on_finish()

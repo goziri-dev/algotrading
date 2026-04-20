@@ -91,6 +91,7 @@ class MT5Session:
         symbol_specs: dict[str, SymbolSpec] | None = None,
         refresh_symbol_specs: bool = False,
         leverage: float = 1 / 100,
+        finalise_trades: bool = False,
     ) -> BacktestSession:
         """Fetch historical bars from MT5 and run a backtest.
 
@@ -180,6 +181,7 @@ class MT5Session:
             initial_balance=initial_balance,
             symbol_specs=resolved_specs,
             leverage=leverage,
+            finalise_trades=finalise_trades,
         )
         bt.run(
             primary_rates=primary_rates,

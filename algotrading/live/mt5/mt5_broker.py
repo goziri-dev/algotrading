@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 from functools import cache
+import math
 
 import MetaTrader5 as mt5
 
@@ -34,7 +35,7 @@ class MT5Broker(Broker):
             symbol=pos.symbol,
             strategy_id=pos.magic,
             direction=SignalDirection.LONG if pos.type == mt5.ORDER_TYPE_BUY else SignalDirection.SHORT, # type: ignore
-            qty=pos.volume,
+            qty=self._lots_to_qty(pos.symbol, pos.volume),
             entry_time=datetime.fromtimestamp(pos.time, tz=timezone.utc),
             entry_price=pos.price_open,
             sl_price=pos.sl or None,
@@ -121,7 +122,13 @@ class MT5Broker(Broker):
         return info.equity
 
     def execute_signal(self, signal: EntrySignal) -> Position:
-        order = self._create_order(signal)
+        lots = self._qty_to_lots(signal.symbol, signal.qty)
+        if lots <= 0:
+            raise SignalExecutionError(
+                "Invalid volume after broker lot constraints",
+                SignalExecutionErrorReason.INVALID_PARAMS,
+            )
+        order = self._create_order(signal, lots)
         result = mt5.order_send(order) # type: ignore
         if result is None:
             raise SignalExecutionError(
@@ -140,24 +147,17 @@ class MT5Broker(Broker):
                 f"Order executed but position not found for ticket={result.order}",
                 SignalExecutionErrorReason.UNKNOWN,
             )
-        pos = positions[0]
-        return Position(
-            id=pos.ticket,
-            symbol=pos.symbol,
-            strategy_id=pos.magic,
-            direction=SignalDirection.LONG if pos.type == mt5.ORDER_TYPE_BUY else SignalDirection.SHORT, # type: ignore
-            qty=pos.volume,
-            entry_time=datetime.fromtimestamp(pos.time, tz=timezone.utc),
-            entry_price=pos.price_open,
-            sl_price=pos.sl or None,
-            tp_price=pos.tp or None,
-        )
+        position = self._position_from_raw(positions[0])
+        # Register so the next check_sl_tp can detect a same-bar SL/TP close.
+        tracked = self._tracked_positions.setdefault((position.symbol, position.strategy_id), {})
+        tracked[position.id] = position
+        return position
 
-    def _create_order(self, signal: EntrySignal):
+    def _create_order(self, signal: EntrySignal, lots: float):
         return {
             "action": mt5.TRADE_ACTION_DEAL,
             "symbol": signal.symbol,
-            "volume": self._qty_to_lots(signal.symbol, signal.qty),
+            "volume": lots,
             "type": mt5.ORDER_TYPE_BUY if signal.direction == "LONG" else mt5.ORDER_TYPE_SELL,
             "price": signal.price,
             "sl": signal.sl or 0.0,
@@ -234,6 +234,32 @@ class MT5Broker(Broker):
         """Account-currency value of a 1-point move for one engine qty unit."""
         return self.get_symbol_spec(symbol).value_per_point
 
+    def max_affordable_qty(self, symbol: str, price: float) -> float:
+        """Maximum engine-qty currently affordable by free margin at ``price``.
+
+        Uses MT5's live margin calculation (``order_calc_margin``) against the
+        account's current free margin so ``buy()`` and ``sell()`` can clamp
+        oversized orders before they hit the server — matching the backtest
+        broker's behavior. Falls back to ``inf`` (no clamp) if MT5 can't
+        compute the margin; the server will still reject with NO_MONEY.
+        """
+        info = mt5.account_info()  # type: ignore
+        if info is None:
+            return float("inf")
+        margin_free = float(info.margin_free)
+        if margin_free <= 0:
+            return 0.0
+        per_lot_margin = mt5.order_calc_margin(  # type: ignore
+            mt5.ORDER_TYPE_BUY, symbol, 1.0, price  # type: ignore
+        )
+        if per_lot_margin is None or per_lot_margin <= 0:
+            return float("inf")
+        symbol_info = self._get_symbol_info(symbol)
+        max_lots = margin_free / float(per_lot_margin)
+        if symbol_info.volume_max > 0:
+            max_lots = min(max_lots, float(symbol_info.volume_max))
+        return max(0.0, max_lots * float(symbol_info.trade_contract_size))
+
     def _get_symbol_info(self, symbol: str):
         info = mt5.symbol_info(symbol) # type: ignore
         if info is None:
@@ -242,11 +268,22 @@ class MT5Broker(Broker):
 
     def _qty_to_lots(self, symbol: str, qty: float) -> float:
         symbol_info = self._get_symbol_info(symbol)
+        if symbol_info.trade_contract_size <= 0:
+            return 0.0
         lots = qty / symbol_info.trade_contract_size
-        lots = max(symbol_info.volume_min, min(lots, symbol_info.volume_max))
-        lots = round(lots / symbol_info.volume_step) * symbol_info.volume_step
-        lots = round(lots, 2)
-        return lots
+        if symbol_info.volume_max > 0:
+            lots = min(lots, symbol_info.volume_max)
+        if symbol_info.volume_min > 0 and lots > 0:
+            lots = max(lots, symbol_info.volume_min)
+        step = symbol_info.volume_step
+        if step > 0:
+            lots = round(lots / step) * step
+            decimals = max(0, -int(math.floor(math.log10(step)))) if step < 1 else 0
+            lots = round(lots, min(8, decimals + 2))
+        return max(0.0, lots)
+
+    def _lots_to_qty(self, symbol: str, lots: float) -> float:
+        return lots * self._get_symbol_info(symbol).trade_contract_size
 
     def close_positions(self, exit_signal: ExitSignal) -> list[tuple[Position, PositionCloseError]]:
         all_positions = self.get_positions(exit_signal.symbol, exit_signal.strategy_id)
@@ -260,10 +297,11 @@ class MT5Broker(Broker):
             try:
                 close_type = mt5.ORDER_TYPE_SELL if pos.direction == SignalDirection.LONG else mt5.ORDER_TYPE_BUY # type: ignore
                 tick = mt5.symbol_info_tick(exit_signal.symbol) # type: ignore
+                contract_size = self._get_symbol_info(exit_signal.symbol).trade_contract_size
                 order = {
                     "action": mt5.TRADE_ACTION_DEAL, # type: ignore
                     "symbol": exit_signal.symbol,
-                    "volume": pos.qty,
+                    "volume": pos.qty / contract_size if contract_size > 0 else pos.qty,
                     "type": close_type,
                     "price": tick.bid if close_type == mt5.ORDER_TYPE_SELL else tick.ask, # type: ignore
                     "deviation": self._DEVIATION,
@@ -300,7 +338,10 @@ class MT5Broker(Broker):
         if not positions:
             return 0.0
         total_pnl = sum(p.profit for p in positions)
-        total_cost = sum(p.price_open * p.volume for p in positions)
+        total_cost = sum(
+            p.price_open * p.volume * self._get_symbol_info(p.symbol).trade_contract_size
+            for p in positions
+        )
         if total_cost == 0:
             return 0.0
         return (total_pnl / total_cost) * 100
@@ -342,18 +383,7 @@ class MT5Broker(Broker):
                 f"Position {position_id} not found after modification",
                 PositionModifyErrorReason.UNKNOWN,
             )
-        p = updated[0]
-        return Position(
-            id=p.ticket,
-            symbol=p.symbol,
-            strategy_id=p.magic,
-            direction=SignalDirection.LONG if p.type == mt5.ORDER_TYPE_BUY else SignalDirection.SHORT, # type: ignore
-            qty=p.volume,
-            entry_time=datetime.fromtimestamp(p.time, tz=timezone.utc),
-            entry_price=p.price_open,
-            sl_price=p.sl or None,
-            tp_price=p.tp or None,
-        )
+        return self._position_from_raw(updated[0])
 
     def update_sl(self, position_id: int, new_sl_price: float) -> Position | None:
         positions = mt5.positions_get(ticket=position_id) # type: ignore

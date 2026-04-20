@@ -194,8 +194,8 @@ class SMACross(Strategy[SMACrossParams]):
 
 
 def run_backtest() -> None:
-    date_from = datetime(2024, 1, 1, tzinfo=timezone.utc)
-    date_to = datetime(2026, 4, 14, tzinfo=timezone.utc)
+    date_from = datetime(2026, 4, 18, tzinfo=timezone.utc)
+    date_to = datetime(2026, 4, 21, tzinfo=timezone.utc)
     primary_tf = mt5.TIMEFRAME_M15
     secondary_tf = mt5.TIMEFRAME_H4
     strategy = SMACross(cot_start=date_from, cot_end=date_to)
@@ -211,6 +211,7 @@ def run_backtest() -> None:
         date_to=date_to,
         secondary={secondary_tf: 300},
         refresh_symbol_specs=False,
+        finalise_trades=True,
     )
     print_backtest_summary(bt.broker)
     save_backtest_plots(
@@ -219,7 +220,7 @@ def run_backtest() -> None:
         primary_tf=primary_tf,
         date_from=date_from,
         date_to=date_to,
-        output_dir=Path("plots/sma_cross2"),
+        output_dir=Path("plots/sma_cross_debug"),
     )
 
 
@@ -237,9 +238,10 @@ def run_live() -> None:
     # Warmup: feed enough bars so all indicators (slowest: SMA-50 on H4) are primed
     # before the live loop starts. primary_count avoids a date_from requirement.
     session.backtest(
-        initial_balance=0,
+        initial_balance=3_000,
         primary_count=100,
         secondary={secondary_tf: 300},
+        finalise_trades=True,
     )
 
     info = mt5.account_info() # type: ignore
