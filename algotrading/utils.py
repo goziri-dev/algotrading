@@ -1,5 +1,7 @@
+import json
 from datetime import datetime, time, timezone
 from itertools import compress
+from pathlib import Path
 from typing import Callable, Literal, Union
 
 import numpy as np
@@ -180,17 +182,32 @@ def session(
 class MonthlyDrawdownTracker:
     """Track peak equity and max drawdown within each calendar month.
 
-    Pass ``equity_source`` as a zero-arg callable returning current equity —
-    e.g. ``lambda: strategy.strategy_equity`` for strategy-scoped, or
-    ``lambda: strategy.equity`` for portfolio-scoped. Call :meth:`update` once
-    per bar with the bar time; read :meth:`breached` to gate new entries.
+    Pass ``equity_source`` as a zero-arg callable returning current equity.
+    For multi-strategy accounts, use ``lambda: strategy.strategy_equity``
+    (strategy-scoped — ignores other strategies' PnL); otherwise
+    ``lambda: strategy.equity`` reads the whole-account view.
+
+    Call :meth:`update` once per bar with the bar time; read :meth:`breached`
+    to gate new entries.
+
+    Pass ``state_path`` to persist state to disk (JSON) on every update so
+    drawdown history survives restarts within the same month. Between a
+    backtest warmup and a live run, call :meth:`reset` so the warmup's
+    synthetic equity history doesn't poison the live session.
     """
 
-    def __init__(self, equity_source: Callable[[], float]):
+    def __init__(
+        self,
+        equity_source: Callable[[], float],
+        state_path: str | Path | None = None,
+    ):
         self._equity_source = equity_source
+        self._state_path = Path(state_path) if state_path is not None else None
         self._month_key: tuple[int, int] | None = None
         self._peak: float = 0.0
         self._max_dd_pct: float = 0.0
+        if self._state_path is not None:
+            self._load_state()
 
     def update(self, now: datetime) -> None:
         key = (now.year, now.month)
@@ -199,6 +216,7 @@ class MonthlyDrawdownTracker:
             self._month_key = key
             self._peak = equity
             self._max_dd_pct = 0.0
+            self._save_state()
             return
         if equity > self._peak:
             self._peak = equity
@@ -206,6 +224,7 @@ class MonthlyDrawdownTracker:
             dd_pct = (self._peak - equity) / self._peak * 100.0
             if dd_pct > self._max_dd_pct:
                 self._max_dd_pct = dd_pct
+        self._save_state()
 
     @property
     def max_dd_pct(self) -> float:
@@ -213,3 +232,42 @@ class MonthlyDrawdownTracker:
 
     def breached(self, limit_pct: float) -> bool:
         return self._max_dd_pct > limit_pct
+
+    def reset(self) -> None:
+        """Clear in-memory state and remove any persisted state file.
+
+        Call between warmup and live so the live session starts from a clean
+        slate rather than inheriting the backtest broker's synthetic peak.
+        """
+        self._month_key = None
+        self._peak = 0.0
+        self._max_dd_pct = 0.0
+        if self._state_path is not None and self._state_path.exists():
+            self._state_path.unlink()
+
+    def _load_state(self) -> None:
+        assert self._state_path is not None
+        if not self._state_path.exists():
+            return
+        try:
+            data = json.loads(self._state_path.read_text(encoding="utf-8"))
+            month = data.get("month")
+            if month is not None and len(month) == 2:
+                self._month_key = (int(month[0]), int(month[1]))
+            self._peak = float(data.get("peak", 0.0))
+            self._max_dd_pct = float(data.get("max_dd_pct", 0.0))
+        except (json.JSONDecodeError, ValueError, KeyError, TypeError, OSError):
+            self._month_key = None
+            self._peak = 0.0
+            self._max_dd_pct = 0.0
+
+    def _save_state(self) -> None:
+        if self._state_path is None:
+            return
+        self._state_path.parent.mkdir(parents=True, exist_ok=True)
+        data = {
+            "month": list(self._month_key) if self._month_key is not None else None,
+            "peak": self._peak,
+            "max_dd_pct": self._max_dd_pct,
+        }
+        self._state_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
