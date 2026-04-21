@@ -17,10 +17,24 @@ class IndicatorTraceSpec:
 
 
 @dataclass(frozen=True)
+class IndicatorMarkerSpec:
+    """Scatter marker drawn on the price chart at bars where ``attr`` is non-NaN.
+
+    Rendered using the same lightweight-charts marker mechanism as trade markers.
+    """
+    attr: str
+    label: str = ""
+    shape: Literal["arrow_up", "arrow_down", "circle", "square"] = "circle"
+    color: str = "#4f46e5"
+    position: Literal["above", "below", "inside"] = "above"
+
+
+@dataclass(frozen=True)
 class IndicatorPlotSpec:
     kind: Literal["overlay", "panel"] = "overlay"
     panel_title: str | None = None
     traces: tuple[IndicatorTraceSpec, ...] = (IndicatorTraceSpec(attr="value"),)
+    markers: tuple[IndicatorMarkerSpec, ...] = ()
 
 
 class Indicator(Growable, ABC):

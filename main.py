@@ -272,4 +272,4 @@ def main(mode: Literal["backtest", "live"]) -> None:
 
 
 if __name__ == "__main__":
-    main("backtest")
+    main(mode="backtest")

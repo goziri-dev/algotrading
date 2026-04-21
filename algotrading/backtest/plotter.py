@@ -41,14 +41,23 @@ class BacktestPlotter:
         output_path.parent.mkdir(parents=True, exist_ok=True)
         fig.savefig(output_path, dpi=140, bbox_inches="tight")
 
-    def _indicator_specs(self) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    def _indicator_specs(
+        self,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
         overlays: list[dict[str, Any]] = []
         panels_by_title: dict[str, list[dict[str, Any]]] = {}
+        marker_groups: list[dict[str, Any]] = []
         primary_times = [t for t in self.report.price_times]
         primary_ns = pd.to_datetime(primary_times, utc=True).astype("int64").to_numpy(dtype=np.int64)
         bar_count = len(primary_times)
+        primary_times_py = pd.to_datetime(primary_times, utc=True).to_pydatetime().tolist()
 
-        def _align_values(values: np.ndarray, source_times: list[Any]) -> np.ndarray | None:
+        def _align_values(
+            values: np.ndarray,
+            source_times: list[Any],
+            *,
+            forward_fill: bool = True,
+        ) -> np.ndarray | None:
             if values.ndim != 1:
                 return None
             if len(values) == bar_count:
@@ -72,10 +81,11 @@ class BacktestPlotter:
 
             out[idx[valid]] = values[valid]
 
-            # Forward-fill so HTF values persist across primary bars until next HTF close.
-            for i in range(1, len(out)):
-                if np.isnan(out[i]):
-                    out[i] = out[i - 1]
+            if forward_fill:
+                # HTF values persist across primary bars until next HTF close.
+                for i in range(1, len(out)):
+                    if np.isnan(out[i]):
+                        out[i] = out[i - 1]
             return out
 
         default_colors = [
@@ -122,8 +132,37 @@ class BacktestPlotter:
                     title = spec.panel_title or indicator.__class__.__name__
                     panels_by_title.setdefault(title, []).append(trace_spec)
 
+            for marker in spec.markers:
+                values = getattr(indicator, marker.attr, None)
+                if values is None:
+                    continue
+                raw_arr = np.asarray(values, dtype=np.float64)
+                source_times = [t for t in source_bars.time]
+                arr = _align_values(raw_arr, source_times, forward_fill=False)
+                if arr is None:
+                    continue
+                entries: list[dict[str, Any]] = []
+                for i, price in enumerate(arr):
+                    if np.isnan(price):
+                        continue
+                    entries.append({
+                        "time": primary_times_py[i],
+                        "position": marker.position,
+                        "shape": marker.shape,
+                        "color": marker.color,
+                        "text": marker.label,
+                    })
+                if not entries:
+                    continue
+                label = (
+                    f"{custom_label} {marker.label}".strip()
+                    if custom_label
+                    else f"{indicator.__class__.__name__}:{marker.attr}"
+                )
+                marker_groups.append({"name": label, "markers": entries})
+
         panels = [{"title": title, "traces": traces} for title, traces in panels_by_title.items()]
-        return overlays, panels
+        return overlays, panels, marker_groups
 
     def save_standard_bundle(
         self,
@@ -161,7 +200,7 @@ class BacktestPlotter:
             self._save_plot(fig_monthly, monthly_path)
             outputs["monthly_returns"] = monthly_path
 
-        overlays, panels = self._indicator_specs()
+        overlays, panels, indicator_markers = self._indicator_specs()
         fig_history = plot_price_with_trades_interactive(
             price_times=self.report.price_times,
             prices=self.report.price_close,
@@ -178,6 +217,7 @@ class BacktestPlotter:
             marker_layout="fill",
             indicator_overlays=overlays,
             indicator_panels=panels,
+            indicator_markers=indicator_markers,
         )
         trade_history_path = output_dir / "trade_history.html"
         save_interactive_figure_html(fig_history, trade_history_path)

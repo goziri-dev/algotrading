@@ -932,6 +932,7 @@ def plot_price_with_trades_interactive(
     marker_layout: str = "staggered",
     indicator_overlays: Sequence[dict[str, Any]] | None = None,
     indicator_panels: Sequence[dict[str, Any]] | None = None,
+    indicator_markers: Sequence[dict[str, Any]] | None = None,
 ):
     StaticLWC = _require_lightweight_charts_static()
     times = _to_python_datetimes(price_times)
@@ -1070,6 +1071,30 @@ def plot_price_with_trades_interactive(
         overlay_line.set(overlay_df)
         overlay_line.run_script(f"try {{ {overlay_line.id}.series.applyOptions({{crosshairMarkerVisible: false}}); }} catch(e) {{ console.warn('[plot] overlay applyOptions failed:', e); }}")
         overlay_names.append(name)
+
+    for marker_group in indicator_markers or []:
+        markers = marker_group.get("markers") or []
+        if not markers:
+            continue
+        name = str(marker_group.get("name", "Indicator markers"))
+        anchor_line = chart.create_line(
+            name=name,
+            color="rgba(0, 0, 0, 0)",
+            width=1,
+            price_line=False,
+            price_label=False,
+        )
+        anchor_df = pd.DataFrame(
+            {
+                "time": pd.to_datetime(display_times, utc=True).tz_localize(None).to_numpy(dtype="datetime64[ns]"),
+                name: price_values,
+            }
+        )
+        anchor_line.set(anchor_df)
+        anchor_line.run_script(
+            f"try {{ {anchor_line.id}.series.applyOptions({{crosshairMarkerVisible: false}}); }} catch(e) {{ console.warn('[plot] indicator marker applyOptions failed:', e); }}"
+        )
+        anchor_line.marker_list(markers)
 
     panel_titles: list[str] = []
     panel_chart_ids: list[str] = []
@@ -1323,6 +1348,11 @@ def plot_price_with_trades_interactive(
             )
             marker_times["losing_exit"].append(exit_times[i])
 
+        # lightweight-charts' setMarkers requires chronological order; out-of-order
+        # entries are silently dropped. The lists above are grouped by category.
+        entry_markers.sort(key=lambda m: m["time"])
+        exit_markers.sort(key=lambda m: m["time"])
+
         if use_candles and entry_markers and exit_markers:
             entry_marker_series = chart.create_line(
                 name="Entries",
@@ -1342,7 +1372,8 @@ def plot_price_with_trades_interactive(
             entry_marker_series.marker_list(entry_markers)
             marker_series.marker_list(exit_markers)
         elif entry_markers or exit_markers:
-            marker_series.marker_list([*entry_markers, *exit_markers])
+            combined = sorted([*entry_markers, *exit_markers], key=lambda m: m["time"])
+            marker_series.marker_list(combined)
 
     headline = title or (f"{symbol} Price with Trade Markers" if symbol else "Price with Trade Markers")
     chart.run_script(

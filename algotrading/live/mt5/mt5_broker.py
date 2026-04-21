@@ -12,7 +12,13 @@ from algotrading.core.broker import (
     PositionModifyError, PositionModifyErrorReason,
 )
 from algotrading.core.position import Position
-from algotrading.core.signal import EntrySignal, ExitSignal, SignalDirection
+from algotrading.core.signal import (
+    EntrySignal,
+    ExitSignal,
+    PendingSignal,
+    SignalDirection,
+    SignalType,
+)
 
 
 class MT5BrokerError(BrokerError):
@@ -26,8 +32,16 @@ class MT5Broker(Broker):
     def __init__(self):
         super().__init__()
         self._tracked_positions: dict[tuple[str, int], dict[int, Position]] = {}
+        self._pending_signals: dict[int, PendingSignal] = {}
         if not mt5.initialize(): # type: ignore
             raise MT5BrokerError(f"MT5 initialization failed: {mt5.last_error()}") # type: ignore
+
+    _PENDING_ORDER_TYPE_MAP = {
+        ("LONG", SignalType.LIMIT): mt5.ORDER_TYPE_BUY_LIMIT,
+        ("SHORT", SignalType.LIMIT): mt5.ORDER_TYPE_SELL_LIMIT,
+        ("LONG", SignalType.STOP): mt5.ORDER_TYPE_BUY_STOP,
+        ("SHORT", SignalType.STOP): mt5.ORDER_TYPE_SELL_STOP,
+    }
 
     def _position_from_raw(self, pos) -> Position:
         return Position(
@@ -165,6 +179,126 @@ class MT5Broker(Broker):
             "deviation": signal.max_slippage if signal.max_slippage is not None else self._DEVIATION,
             "magic": signal.strategy_id,
         }
+
+    def queue_signal(self, signal: EntrySignal) -> PendingSignal:
+        lots = self._qty_to_lots(signal.symbol, signal.qty)
+        if lots <= 0:
+            raise SignalExecutionError(
+                "Invalid volume after broker lot constraints",
+                SignalExecutionErrorReason.INVALID_PARAMS,
+            )
+        order_type = self._PENDING_ORDER_TYPE_MAP.get((signal.direction, signal.type))
+        if order_type is None:
+            raise SignalExecutionError(
+                f"Unsupported pending order: direction={signal.direction}, type={signal.type}",
+                SignalExecutionErrorReason.INVALID_PARAMS,
+            )
+        request = {
+            "action": mt5.TRADE_ACTION_PENDING, # type: ignore
+            "symbol": signal.symbol,
+            "volume": lots,
+            "type": order_type,
+            "price": signal.price,
+            "sl": signal.sl or 0.0,
+            "tp": signal.tp or 0.0,
+            "magic": signal.strategy_id,
+            "type_time": mt5.ORDER_TIME_GTC, # type: ignore
+        }
+        result = mt5.order_send(request) # type: ignore
+        if result is None:
+            raise SignalExecutionError(
+                f"Pending order send returned None. MT5 error: {mt5.last_error()}", # type: ignore
+                SignalExecutionErrorReason.UNKNOWN,
+            )
+        if result.retcode != mt5.TRADE_RETCODE_DONE: # type: ignore
+            reason = self._build_signal_retcode_reasons().get(result.retcode, SignalExecutionErrorReason.BROKER_REJECTED)
+            raise SignalExecutionError(
+                f"Pending order failed: retcode={result.retcode}, comment={result.comment}",
+                reason,
+            )
+        ticket = int(result.order)
+        ps = PendingSignal(
+            id=ticket,
+            signal=signal,
+            queued_time=datetime.now(timezone.utc),
+        )
+        self._pending_signals[ticket] = ps
+        return ps
+
+    def cancel_signal(self, signal_id: int) -> bool:
+        ps = self._pending_signals.get(signal_id)
+        if ps is None:
+            return False
+        request = {
+            "action": mt5.TRADE_ACTION_REMOVE, # type: ignore
+            "order": signal_id,
+        }
+        result = mt5.order_send(request) # type: ignore
+        # Treat "order already gone" as success so the local queue stays consistent.
+        already_gone = result is not None and result.retcode in (
+            mt5.TRADE_RETCODE_INVALID_ORDER, # type: ignore
+            mt5.TRADE_RETCODE_POSITION_CLOSED, # type: ignore
+        )
+        if result is not None and (result.retcode == mt5.TRADE_RETCODE_DONE or already_gone): # type: ignore
+            del self._pending_signals[signal_id]
+            return True
+        return False
+
+    def get_pending_signals(self, symbol: str, strategy_id: int) -> list[PendingSignal]:
+        live_orders = mt5.orders_get(symbol=symbol) or () # type: ignore
+        live_tickets = {int(o.ticket) for o in live_orders if o.magic == strategy_id}
+        return [
+            ps for ticket, ps in self._pending_signals.items()
+            if ticket in live_tickets
+            and ps.signal.symbol == symbol
+            and ps.signal.strategy_id == strategy_id
+        ]
+
+    def fill_pending_signals(
+        self,
+        symbol: str,
+        open: float,
+        high: float,
+        low: float,
+        strategy_id: int,
+    ) -> list[tuple[PendingSignal, "Position | SignalExecutionError"]]:
+        """Detect server-side fills of tracked pending orders.
+
+        MT5 fills pending orders server-side when price hits the trigger, so the
+        bar OHL inputs are ignored. For each tracked pending that no longer
+        appears in ``orders_get``, we consult ``history_orders_get`` to see if it
+        filled (→ emit Position) or was cancelled externally (→ drop silently).
+        """
+        _ = open, high, low
+        results: list[tuple[PendingSignal, Position | SignalExecutionError]] = []
+        live_orders = mt5.orders_get(symbol=symbol) or () # type: ignore
+        live_tickets = {int(o.ticket) for o in live_orders if o.magic == strategy_id}
+
+        for ticket in list(self._pending_signals.keys()):
+            ps = self._pending_signals[ticket]
+            if ps.signal.symbol != symbol or ps.signal.strategy_id != strategy_id:
+                continue
+            if ticket in live_tickets:
+                continue
+
+            del self._pending_signals[ticket]
+            historical = mt5.history_orders_get(ticket=ticket) # type: ignore
+            if not historical:
+                continue
+            hist_order = historical[0]
+            if hist_order.state != mt5.ORDER_STATE_FILLED: # type: ignore
+                continue
+            position_id = int(getattr(hist_order, "position_id", 0) or 0)
+            if not position_id:
+                continue
+            positions = mt5.positions_get(ticket=position_id) # type: ignore
+            if not positions:
+                continue
+            position = self._position_from_raw(positions[0])
+            tracked = self._tracked_positions.setdefault((position.symbol, position.strategy_id), {})
+            tracked[position.id] = position
+            results.append((ps, position))
+        return results
 
     def get_symbol_spec(
         self,
