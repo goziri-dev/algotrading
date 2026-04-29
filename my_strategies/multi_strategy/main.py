@@ -53,7 +53,7 @@ def run_live() -> None:
     bbands_reverse = BBANDSReverse(symbol="EURUSD.i")
 
     session = MT5Session(
-        strategies=[sma_cross, bbands_reverse],
+        strategies=[bbands_reverse],
         primary_tf=primary_tf,
     )
     # Warmup: prime indicators from cached history before the live loop starts.
